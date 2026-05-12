@@ -135,7 +135,28 @@ export function SettingsPage({ settings, onSave }: Props) {
       </section>
 
       <section style={{ marginTop: 16 }}>
+        <h3>측정 입력 순서</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+          <span style={{ fontSize: 15 }}>{local.fieldOrder[0]} → {local.fieldOrder[1]}</span>
+          <button
+            type="button"
+            onClick={() => setLocal({ ...local, fieldOrder: [...local.fieldOrder].reverse() })}
+            style={{ fontSize: 13, padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', cursor: 'pointer' }}
+          >
+            순서 바꾸기
+          </button>
+        </div>
+        <div style={{ fontSize: 13, color: '#64748b' }}>
+          <div>자동 입력 항목: {local.autoFields.join(' · ')}</div>
+          <div>사용자 입력 항목: {local.userFields.join(' · ')}</div>
+        </div>
+      </section>
+
+      <section style={{ marginTop: 16 }}>
         <h3>Google Apps Script URL</h3>
+        <p style={{ fontSize: 13, color: '#666', margin: '4px 0' }}>
+          v0.1은 Apps Script 방식만 지원합니다. Google Spreadsheet 링크가 아닌 Web App URL을 입력하세요.
+        </p>
         <p style={{ fontSize: 13, color: '#666', margin: '4px 0' }}>
           업로드는 자동 동기화가 아닙니다. 확인 후 업로드 버튼을 눌러야 전송됩니다.
         </p>

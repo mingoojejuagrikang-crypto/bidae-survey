@@ -51,7 +51,7 @@ function useSurveyRowsWithAll(surveyDate: string) {
 export function App() {
   const { settings, saveSettings, loaded } = useSettings()
   const { rows, createRows, updateRow, allRows } = useSurveyRowsWithAll(settings.surveyDate)
-  const { getLogs, clearLogs } = useLogs(settings)
+  const { addLog, getLogs, clearLogs } = useLogs(settings)
   const [page, setPage] = useState<Page>('home')
   const [uploadMsg, setUploadMsg] = useState('')
 
@@ -132,6 +132,7 @@ export function App() {
         onDownloadCSV={handleDownloadCSV}
         onDownloadZip={handleDownloadZip}
         onUpload={handleUpload}
+        addLog={addLog}
       />
     )
   }

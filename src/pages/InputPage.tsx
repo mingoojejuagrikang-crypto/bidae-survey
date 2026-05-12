@@ -1,10 +1,13 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
-import type { SurveyRow, AppSettings } from '../types'
+import { useState, useRef, useEffect } from 'react'
+import type { SurveyRow, AppSettings, LogEntry } from '../types'
 import { parseVoiceCommand } from '../utils/voiceParser'
 import { speak } from '../utils/tts'
 import { findPreviousRow } from '../utils/previousValue'
 import { getSpeechRecognition, type ISpeechRecognition } from '../utils/speechRecognition'
 import { WarningBadge } from '../components/WarningBadge'
+import { db } from '../db'
+
+const MAX_ERRORS = 5
 
 interface Props {
   rows: SurveyRow[]
@@ -15,25 +18,39 @@ interface Props {
   onDownloadCSV: () => void
   onDownloadZip: () => void
   onUpload: () => void
+  addLog: (partial: Partial<LogEntry> & { fieldName: string; surveyDate: string; rowKey: string }) => Promise<void>
 }
 
-export function InputPage({ rows, allRows, settings, onUpdateRow, onNavigate, onDownloadCSV, onDownloadZip, onUpload }: Props) {
+export function InputPage({ rows, allRows, settings, onUpdateRow, onNavigate, onDownloadCSV, onDownloadZip, onUpload, addLog }: Props) {
+  const orderedFields = settings.fieldOrder as Array<'횡경' | '종경'>
   const [currentRowIdx, setCurrentRowIdx] = useState(0)
-  const [currentField, setCurrentField] = useState<'횡경' | '종경'>('횡경')
+  const [currentField, setCurrentField] = useState<'횡경' | '종경'>(orderedFields[0])
   const [listening, setListening] = useState(false)
-  const [lastField, setLastField] = useState<'횡경' | '종경'>('횡경')
+  const [lastField, setLastField] = useState<'횡경' | '종경'>(orderedFields[0])
   const [warnings, setWarnings] = useState<string[]>([])
+
   const recognitionRef = useRef<ISpeechRecognition | null>(null)
   const fieldRef = useRef(currentField)
+  const lastFieldRef = useRef(lastField)
   const rowIdxRef = useRef(currentRowIdx)
+  const listeningRef = useRef(false)
+  const stopRequestedRef = useRef(false)
+  const consecutiveErrorsRef = useRef(0)
+  const startTimeRef = useRef(0)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const rowsRef = useRef(rows)
 
   useEffect(() => { fieldRef.current = currentField }, [currentField])
+  useEffect(() => { lastFieldRef.current = lastField }, [lastField])
   useEffect(() => { rowIdxRef.current = currentRowIdx }, [currentRowIdx])
+  useEffect(() => { rowsRef.current = rows }, [rows])
 
   const currentRow = rows[currentRowIdx]
   const prevRow = currentRow ? findPreviousRow(currentRow, allRows) : null
 
-  const checkWarnings = useCallback((field: '횡경' | '종경', value: string, prev: SurveyRow | null): string[] => {
+  function checkWarnings(field: '횡경' | '종경', value: string, prev: SurveyRow | null): string[] {
     const warns: string[] = []
     const num = parseFloat(value)
     if (!isNaN(num)) {
@@ -54,95 +71,247 @@ export function InputPage({ rows, allRows, settings, onUpdateRow, onNavigate, on
     setWarnings(warns)
     if (warns.length > 0) speak('경고')
     return warns
-  }, [settings])
+  }
+
+  async function saveCurrentChunkAsClip(rowKey: string, fieldName: string): Promise<string> {
+    const recorder = mediaRecorderRef.current
+    if (!settings.logEnabled || !settings.audioClipEnabled || !recorder) return ''
+    const chunks = [...audioChunksRef.current]
+    audioChunksRef.current = []
+    if (chunks.length === 0) return ''
+    const mimeType = recorder.mimeType || 'audio/webm'
+    const ext = mimeType.includes('webm') ? 'webm' : mimeType.includes('mp4') ? 'mp4' : 'audio'
+    const ts = new Date().toISOString().replace(/:/g, '-').replace(/\./g, '-')
+    const fileName = `${ts}_${fieldName}.${ext}`
+    const blob = new Blob(chunks, { type: mimeType })
+    await db.audioClips.add({ clipId: crypto.randomUUID(), fileName, blob, rowKey, fieldName, timestamp: new Date().toISOString() })
+    return fileName
+  }
 
   function goPrev() {
-    if (fieldRef.current === '종경') {
-      setCurrentField('횡경')
-      fieldRef.current = '횡경'
-      setLastField('횡경')
-      speak('횡경')
+    const [first, second] = orderedFields
+    if (fieldRef.current === second) {
+      setCurrentField(first)
+      fieldRef.current = first
+      setLastField(first)
+      lastFieldRef.current = first
+      speak(first)
     } else {
       if (rowIdxRef.current > 0) {
         const newIdx = rowIdxRef.current - 1
         setCurrentRowIdx(newIdx)
         rowIdxRef.current = newIdx
-        setCurrentField('종경')
-        fieldRef.current = '종경'
+        setCurrentField(second)
+        fieldRef.current = second
+        setLastField(second)
+        lastFieldRef.current = second
         setWarnings([])
-        speak('종경')
-        setLastField('종경')
+        speak(second)
       }
     }
   }
 
   function goNext() {
-    if (fieldRef.current === '횡경') {
-      setCurrentField('종경')
-      fieldRef.current = '종경'
-      setLastField('종경')
-      speak('종경')
+    const [first, second] = orderedFields
+    if (fieldRef.current === first) {
+      setCurrentField(second)
+      fieldRef.current = second
+      setLastField(second)
+      lastFieldRef.current = second
+      speak(second)
     } else {
-      if (rowIdxRef.current < rows.length - 1) {
+      if (rowIdxRef.current < rowsRef.current.length - 1) {
         const newIdx = rowIdxRef.current + 1
         setCurrentRowIdx(newIdx)
         rowIdxRef.current = newIdx
-        setCurrentField('횡경')
-        fieldRef.current = '횡경'
+        setCurrentField(first)
+        fieldRef.current = first
+        setLastField(first)
+        lastFieldRef.current = first
         setWarnings([])
-        speak('횡경')
-        setLastField('횡경')
+        speak(first)
       }
     }
   }
 
-  async function applyValue(field: '횡경' | '종경', value: number) {
-    const row = rows[rowIdxRef.current]
+  async function applyValue(
+    field: '횡경' | '종경',
+    value: number,
+    recognizedText: string,
+    inputMode: LogEntry['inputMode'],
+    correctionType: LogEntry['correctionType'],
+    audioClipFileName: string,
+    latencyMs: number,
+  ) {
+    const row = rowsRef.current[rowIdxRef.current]
     if (!row) return
     const prev = findPreviousRow(row, allRows)
-    const updated = { ...row, [field]: String(value) }
-    checkWarnings(field, String(value), prev)
-    await onUpdateRow(updated)
+    const warns = checkWarnings(field, String(value), prev)
+    await onUpdateRow({ ...row, [field]: String(value) })
     speak(`${field} ${value}`)
+    void addLog({
+      fieldName: field,
+      surveyDate: row.surveyDate,
+      rowKey: row.rowId,
+      recognizedText,
+      normalizedValue: String(value),
+      finalValue: String(value),
+      inputMode,
+      correctionType,
+      audioClipFileName,
+      latencyMs,
+      errorType: warns.some(w => w.includes('범위')) ? 'range_warning' : 'none',
+    })
+    if (warns.some(w => w.includes('변화'))) {
+      void addLog({
+        fieldName: field,
+        surveyDate: row.surveyDate,
+        rowKey: row.rowId,
+        finalValue: String(value),
+        inputMode,
+        correctionType,
+        errorType: 'range_warning',
+      })
+    }
   }
 
-  function handleVoice(transcript: string) {
+  async function handleVoice(transcript: string) {
+    const latencyMs = Date.now() - startTimeRef.current
+    startTimeRef.current = Date.now()
     const cmd = parseVoiceCommand(transcript)
+    const row = rowsRef.current[rowIdxRef.current]
+    if (!row) return
+    const audioClipFileName = await saveCurrentChunkAsClip(row.rowId, fieldRef.current)
     if (cmd.type === 'number' && cmd.value !== undefined) {
-      void applyValue(fieldRef.current, cmd.value)
       setLastField(fieldRef.current)
+      lastFieldRef.current = fieldRef.current
+      await applyValue(fieldRef.current, cmd.value, transcript, 'voice', 'normal', audioClipFileName, latencyMs)
     } else if (cmd.type === '수정' && cmd.value !== undefined) {
-      void applyValue(lastField, cmd.value)
+      await applyValue(lastFieldRef.current, cmd.value, transcript, 'voice', '수정', audioClipFileName, latencyMs)
     } else if (cmd.type === '이전') {
+      void addLog({
+        fieldName: fieldRef.current,
+        surveyDate: row.surveyDate,
+        rowKey: row.rowId,
+        recognizedText: transcript,
+        correctionType: '이전',
+        inputMode: 'voice',
+        audioClipFileName,
+        latencyMs,
+        errorType: 'none',
+      })
       goPrev()
     } else if (cmd.type === '다음') {
+      void addLog({
+        fieldName: fieldRef.current,
+        surveyDate: row.surveyDate,
+        rowKey: row.rowId,
+        recognizedText: transcript,
+        correctionType: '다음',
+        inputMode: 'voice',
+        audioClipFileName,
+        latencyMs,
+        errorType: 'none',
+      })
       goNext()
     }
   }
 
-  function startListening() {
+  function startListeningRecognition() {
     const SpeechRec = getSpeechRecognition()
-    if (!SpeechRec) {
-      alert('이 브라우저는 음성인식을 지원하지 않습니다.')
-      return
-    }
+    if (!SpeechRec) return
     const recognition = new SpeechRec()
     recognition.lang = 'ko-KR'
     recognition.continuous = false
     recognition.interimResults = false
     recognition.onresult = (e: SpeechRecognitionEvent) => {
-      const transcript = e.results[0][0].transcript
-      handleVoice(transcript)
+      consecutiveErrorsRef.current = 0
+      void handleVoice(e.results[0][0].transcript)
     }
-    recognition.onerror = () => setListening(false)
-    recognition.onend = () => setListening(false)
+    recognition.onerror = () => {
+      consecutiveErrorsRef.current++
+      const row = rowsRef.current[rowIdxRef.current]
+      if (row) {
+        void addLog({
+          fieldName: fieldRef.current,
+          surveyDate: row.surveyDate,
+          rowKey: row.rowId,
+          errorType: 'stt_error',
+          inputMode: 'voice',
+        })
+      }
+    }
+    recognition.onend = () => {
+      recognitionRef.current = null
+      if (listeningRef.current && !stopRequestedRef.current && consecutiveErrorsRef.current < MAX_ERRORS) {
+        startTimeRef.current = Date.now()
+        startListeningRecognition()
+      } else {
+        setListening(false)
+        listeningRef.current = false
+        stopMediaRecorder()
+      }
+    }
     recognition.start()
     recognitionRef.current = recognition
+  }
+
+  async function startListening() {
+    const SpeechRec = getSpeechRecognition()
+    if (!SpeechRec) {
+      alert('이 브라우저는 음성인식을 지원하지 않습니다.')
+      const row = rowsRef.current[rowIdxRef.current]
+      if (row) {
+        void addLog({
+          fieldName: fieldRef.current,
+          surveyDate: row.surveyDate,
+          rowKey: row.rowId,
+          errorType: 'unsupported',
+          inputMode: 'system',
+        })
+      }
+      return
+    }
+    stopRequestedRef.current = false
+    consecutiveErrorsRef.current = 0
+    listeningRef.current = true
     setListening(true)
+    if (settings.logEnabled && settings.audioClipEnabled) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        mediaStreamRef.current = stream
+        const recorder = new MediaRecorder(stream)
+        mediaRecorderRef.current = recorder
+        audioChunksRef.current = []
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data)
+        }
+        recorder.start(100)
+      } catch {
+        // mic denied or MediaRecorder unsupported — continue without audio
+      }
+    }
+    startTimeRef.current = Date.now()
+    startListeningRecognition()
+  }
+
+  function stopMediaRecorder() {
+    const recorder = mediaRecorderRef.current
+    if (recorder && recorder.state !== 'inactive') recorder.stop()
+    mediaRecorderRef.current = null
+    const stream = mediaStreamRef.current
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop())
+      mediaStreamRef.current = null
+    }
+    audioChunksRef.current = []
   }
 
   function stopListening() {
+    stopRequestedRef.current = true
+    listeningRef.current = false
     recognitionRef.current?.stop()
+    stopMediaRecorder()
     setListening(false)
   }
 
@@ -170,7 +339,7 @@ export function InputPage({ rows, allRows, settings, onUpdateRow, onNavigate, on
       {warnings.map((w, i) => <WarningBadge key={i} message={w} />)}
 
       <div style={{ background: '#fff', border: '2px solid #2563eb', borderRadius: 12, padding: 16, marginBottom: 12 }}>
-        {(['횡경', '종경'] as const).map(field => {
+        {orderedFields.map(field => {
           const val = currentRow[field]
           const prevVal = prevRow ? prevRow[field] : null
           const isCurrent = currentField === field
@@ -196,7 +365,27 @@ export function InputPage({ rows, allRows, settings, onUpdateRow, onNavigate, on
                   await onUpdateRow(updated)
                   checkWarnings(field, e.target.value, prevRow)
                 }}
-                onFocus={() => { setCurrentField(field); setLastField(field) }}
+                onBlur={e => {
+                  const value = e.target.value
+                  if (value !== '') {
+                    void addLog({
+                      fieldName: field,
+                      surveyDate: currentRow.surveyDate,
+                      rowKey: currentRow.rowId,
+                      finalValue: value,
+                      normalizedValue: value,
+                      inputMode: 'manual',
+                      correctionType: 'manual',
+                      errorType: 'none',
+                    })
+                  }
+                }}
+                onFocus={() => {
+                  setCurrentField(field)
+                  fieldRef.current = field
+                  setLastField(field)
+                  lastFieldRef.current = field
+                }}
                 style={{ width: 80, fontSize: 16, marginLeft: 8 }}
                 data-testid={`input-${field}`}
               />
@@ -221,7 +410,7 @@ export function InputPage({ rows, allRows, settings, onUpdateRow, onNavigate, on
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-        <button onClick={startListening} disabled={listening}
+        <button onClick={() => void startListening()} disabled={listening}
           style={{ padding: 12, fontSize: 15, background: listening ? '#94a3b8' : '#16a34a', color: '#fff', border: 'none', borderRadius: 8 }}>
           {listening ? '인식 중...' : '음성 시작'}
         </button>
@@ -229,11 +418,37 @@ export function InputPage({ rows, allRows, settings, onUpdateRow, onNavigate, on
           style={{ padding: 12, fontSize: 15, background: '#dc2626', color: '#fff', border: 'none', borderRadius: 8 }}>
           음성 종료
         </button>
-        <button onClick={goPrev}
+        <button onClick={() => {
+          const row = rowsRef.current[rowIdxRef.current]
+          if (row) {
+            void addLog({
+              fieldName: fieldRef.current,
+              surveyDate: row.surveyDate,
+              rowKey: row.rowId,
+              correctionType: '이전',
+              inputMode: 'manual',
+              errorType: 'none',
+            })
+          }
+          goPrev()
+        }}
           style={{ padding: 12, fontSize: 15, background: '#6366f1', color: '#fff', border: 'none', borderRadius: 8 }}>
           이전
         </button>
-        <button onClick={goNext}
+        <button onClick={() => {
+          const row = rowsRef.current[rowIdxRef.current]
+          if (row) {
+            void addLog({
+              fieldName: fieldRef.current,
+              surveyDate: row.surveyDate,
+              rowKey: row.rowId,
+              correctionType: '다음',
+              inputMode: 'manual',
+              errorType: 'none',
+            })
+          }
+          goNext()
+        }}
           style={{ padding: 12, fontSize: 15, background: '#0891b2', color: '#fff', border: 'none', borderRadius: 8 }}>
           다음
         </button>

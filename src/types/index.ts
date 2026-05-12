@@ -116,7 +116,7 @@ export interface LogEntry {
   normalizedValue: string
   finalValue: string
   confidence: number
-  inputMode: 'voice' | 'manual'
+  inputMode: 'voice' | 'manual' | 'system'
   correctionType: 'normal' | '수정' | '이전' | '다음' | 'manual'
   errorType: 'stt_error' | 'range_warning' | 'unsupported' | 'none'
   latencyMs: number
